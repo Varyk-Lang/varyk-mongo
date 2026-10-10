@@ -1,0 +1,1822 @@
+// The package's tests, run by `varyk test` against the MongoDB server
+// `MONGO_URL` names, or `mongodb://127.0.0.1:27017/varyk_test` when it is
+// not set. Each test works in a collection named after itself and deletes
+// its documents first, so tests run in parallel and a rerun starts clean.
+
+struct Config {
+    mongo_url: Option<string>,
+}
+
+// The server every test uses: `MONGO_URL`, or the local default.
+fn url() -> string {
+    let parsed: Result<Config, Error> = env::parse();
+    match parsed {
+        Ok(config) => match config.mongo_url {
+            Some(url) => url.clone(),
+            None => "mongodb://127.0.0.1:27017/varyk_test",
+        },
+        Err(_) => "mongodb://127.0.0.1:27017/varyk_test",
+    }
+}
+
+// The message of a `connect` that should fail, or "connected" when it
+// did not.
+async fn connect_message(url: string) -> string {
+    let opened: Result<crate::Database, Error> = crate::connect(url).await;
+    match opened {
+        Ok(_) => "connected",
+        Err(e) => e.message().clone(),
+    }
+}
+
+#[test]
+async fn connect_and_ping() {
+    let opened: Result<crate::Database, Error> = crate::connect(url()).await;
+    match opened {
+        Ok(db) => {
+            let other = db.clone();
+            let _users = other.collection("connect_and_ping");
+            let pinged: Result<bool, Error> = db.ping().await;
+            match pinged {
+                Ok(up) => assert(up),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn connect_without_a_database_is_an_error() {
+    let message = connect_message("mongodb://ada:hunter2@127.0.0.1:27017").await;
+    assert(message.contains("names no database"));
+    assert(message.contains("after the host"));
+    assert(!message.contains("hunter2"));
+    assert(!message.contains("ada:"));
+    let with_options = connect_message("mongodb://127.0.0.1:27017/?retryWrites=true").await;
+    assert(with_options.contains("names no database"));
+    assert(!with_options.contains("retryWrites"));
+}
+
+#[test]
+async fn connect_to_a_url_that_cannot_be_read_is_an_error() {
+    let bad_option = connect_message("mongodb://ada:hunter2@127.0.0.1:27017/app?maxPoolSize=many").await;
+    assert(bad_option.contains("cannot be read"));
+    assert(!bad_option.contains("many"));
+    assert(!bad_option.contains("hunter2"));
+    assert(!bad_option.contains("maxPoolSize"));
+    let bad_scheme = connect_message("postgres://ada:hunter2@127.0.0.1/app").await;
+    assert(bad_scheme.contains("cannot be read"));
+    assert(!bad_scheme.contains("hunter2"));
+    assert(!bad_scheme.contains("postgres"));
+    let empty = connect_message("").await;
+    assert(empty.contains("cannot be read"));
+}
+
+#[test]
+async fn connect_to_an_unreachable_server_is_an_error() {
+    let message = connect_message("mongodb://ada:hunter2@127.0.0.1:1/app?serverSelectionTimeoutMS=500").await;
+    assert(message.contains("cannot reach the MongoDB server"));
+    assert(!message.contains("hunter2"));
+    assert(!message.contains("mongodb://"));
+    assert(!message.contains("serverSelectionTimeoutMS"));
+}
+
+#[test]
+async fn connect_to_an_srv_name_that_does_not_resolve_is_an_error() {
+    let message = connect_message("mongodb+srv://nonexistent.invalid/app").await;
+    assert(message.contains("cannot be reached"));
+    assert(!message.contains("mongodb+srv://nonexistent.invalid/app"));
+    let with_user = connect_message("mongodb+srv://ada:hunter2@nonexistent.invalid/app").await;
+    assert(with_user.contains("cannot be reached"));
+    assert(!with_user.contains("hunter2"));
+}
+
+#[test]
+async fn connect_with_a_wrong_password_is_an_error_with_the_auth_source_hint() {
+    let wrong = url().replace("mongodb://", "mongodb://varyk_nobody:not_the_password@");
+    let message = connect_message(wrong).await;
+    assert(message.contains("refused the user name or password"));
+    assert(message.contains("authSource=admin"));
+    assert(!message.contains("not_the_password"));
+    assert(!message.contains("varyk_nobody"));
+    assert(!message.contains("mongodb://"));
+}
+
+// The database every test of a collection uses.
+async fn database() -> Result<crate::Database, Error> {
+    crate::connect(url()).await
+}
+
+// Deletes every document of `c`, so a rerun starts clean: `true` when it
+// did.
+async fn cleared(c: crate::Collection) -> bool {
+    let deleted: Result<u64, Error> = c.delete_many("{}").await;
+    deleted.is_ok()
+}
+
+struct Person {
+    #[rename("_id")]
+    id: Uuid,
+    name: string,
+    age: i32,
+}
+
+struct Aged {
+    name: string,
+    age: i32,
+}
+
+struct Named {
+    name: string,
+}
+
+struct Numbered {
+    n: i32,
+}
+
+#[test]
+async fn reading_with_zero_and_several_values() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("reading_with_zero_and_several_values");
+            assert(cleared(c).await);
+            let ada = Person { id: Uuid::new(), name: "Ada", age: 36 };
+            let inserted: Result<string, Error> = c.insert(ada).await;
+            match inserted {
+                Ok(id) => assert_eq(id, format!("{}", ada.id)),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let others = vec![
+                Person { id: Uuid::new(), name: "Alan", age: 41 },
+                Person { id: Uuid::new(), name: "Grace", age: 45 },
+            ];
+            let added: Result<Vec<string>, Error> = c.insert_many(others).await;
+            match added {
+                Ok(ids) => assert_eq(ids.len(), 2),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let everyone: Result<Vec<Person>, Error> = c.all("{}").await;
+            match everyone {
+                Ok(found) => assert_eq(found.len(), 3),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let forties: Result<Vec<Person>, Error> = c.all("{ age: { $gte: ?, $lt: ? } }", 40, 45).await;
+            match forties {
+                Ok(found) => {
+                    let names: Vec<string> = found.iter().map(|p| p.name.clone()).collect();
+                    assert_eq(names, vec!["Alan"]);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let one: Result<Person, Error> = c.one("{ name: ? }", "Ada").await;
+            match one {
+                Ok(p) => {
+                    assert_eq(p.id, ada.id);
+                    assert_eq(p.age, 36);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let all_counted: Result<u64, Error> = c.count("{}").await;
+            match all_counted {
+                Ok(n) => assert_eq(n, 3),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let older: Result<u64, Error> = c.count("{ age: { $gt: ? } }", 40).await;
+            match older {
+                Ok(n) => assert_eq(n, 2),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let alan: Result<Option<Aged>, Error> = c.first("{ age: ? }", 41).await;
+            match alan {
+                Ok(Some(p)) => assert_eq(p.name, "Alan"),
+                Ok(None) => assert(false),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let nobody: Result<Option<Person>, Error> = c.first("{ name: ? }", "Nobody").await;
+            match nobody {
+                Ok(found) => assert(!found.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let missing: Result<Person, Error> = c.one("{ name: ? }", "Nobody").await;
+            match missing {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "no document matches the filter; to read one that may be missing, use `first`"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn find_sorts_skips_and_limits() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("find_sorts_skips_and_limits");
+            assert(cleared(c).await);
+            let numbers = vec![Numbered { n: 3 }, Numbered { n: 1 }, Numbered { n: 5 }, Numbered { n: 2 }, Numbered { n: 4 }];
+            let added: Result<Vec<string>, Error> = c.insert_many(numbers).await;
+            assert(added.is_ok());
+            let down: Result<Vec<Numbered>, Error> = c.find("{}").sort("{ n: -1 }").all().await;
+            match down {
+                Ok(found) => {
+                    let ns: Vec<i32> = found.iter().map(|x| x.n).collect();
+                    assert_eq(ns, vec![5, 4, 3, 2, 1]);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let page: Result<Vec<Numbered>, Error> = c.find("{}").sort("{ n: 1 }").skip(1).limit(2).all().await;
+            match page {
+                Ok(found) => {
+                    let ns: Vec<i32> = found.iter().map(|x| x.n).collect();
+                    assert_eq(ns, vec![2, 3]);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let lowest: Result<Option<Numbered>, Error> = c.find("{ n: { $gt: ? } }", 2).sort("{ n: 1 }").first().await;
+            match lowest {
+                Ok(Some(x)) => assert_eq(x.n, 3),
+                Ok(None) => assert(false),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let highest: Result<Numbered, Error> = c.find("{ n: { $gt: ? } }", 2).sort("{ n: -1 }").one().await;
+            match highest {
+                Ok(x) => assert_eq(x.n, 5),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let skipped: Result<Numbered, Error> = c.find("{}").sort("{ n: 1 }").skip(3).one().await;
+            match skipped {
+                Ok(x) => assert_eq(x.n, 4),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let none: Result<Option<Numbered>, Error> = c.find("{ n: ? }", 9).first().await;
+            match none {
+                Ok(found) => assert(!found.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let no_one: Result<Numbered, Error> = c.find("{ n: ? }", 9).one().await;
+            match no_one {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("no document matches the filter")),
+            }
+            // `limit` gives a new query; the one it was called on is as it was.
+            let base = c.find("{ n: { $lte: ? } }", 4);
+            let _limited = base.limit(1);
+            let every: Result<Vec<Numbered>, Error> = base.all().await;
+            match every {
+                Ok(found) => assert_eq(found.len(), 4),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn find_refuses_a_negative_count_a_limit_of_zero_and_a_value_in_the_sort() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("find_refuses_a_negative_count_a_limit_of_zero_and_a_value_in_the_sort");
+            let negative_skip: Result<Vec<Numbered>, Error> = c.find("{}").skip(-1).all().await;
+            match negative_skip {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "`skip` takes a number of documents from 0 up; this one is negative"),
+            }
+            let negative_limit: Result<Vec<Numbered>, Error> = c.find("{}").limit(-1).all().await;
+            match negative_limit {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "`limit` takes a number of documents from 1 up; this one is negative"),
+            }
+            let zero: Result<Option<Numbered>, Error> = c.find("{}").limit(0).first().await;
+            match zero {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("MongoDB reads a limit of 0 as no limit")),
+            }
+            let zero_all: Result<Vec<Numbered>, Error> = c.find("{}").limit(0).all().await;
+            assert(zero_all.is_err());
+            let valued: Result<Vec<Numbered>, Error> = c.find("{}").sort("{ n: ? }").all().await;
+            match valued {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().contains("the sort text, at character 6"));
+                    assert(e.message().contains("a value can stand only"));
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+enum Color {
+    Red,
+    #[rename("deep_blue")]
+    Blue,
+}
+
+struct Place {
+    city: string,
+    zip: i32,
+}
+
+struct Everything {
+    #[rename("_id")]
+    id: Uuid,
+    flag: bool,
+    name: string,
+    tiny: i8,
+    short: i16,
+    whole: i32,
+    octet: u8,
+    word: u16,
+    long: i64,
+    wide: u32,
+    big: u64,
+    size: usize,
+    ratio: f32,
+    score: f64,
+    at: Time,
+    data: Bytes,
+    missing: Option<string>,
+    present: Option<i32>,
+    list: Vec<i32>,
+    place: Place,
+    places: Vec<Place>,
+    tags: HashMap<string, i32>,
+    color: Color,
+}
+
+// The number a `count` gave, as text, or its message when it failed, so
+// a failing check shows why.
+fn shown(counted: Result<u64, Error>) -> string {
+    match counted {
+        Ok(n) => format!("{}", n),
+        Err(e) => e.message().clone(),
+    }
+}
+
+#[test]
+async fn every_type_round_trips_and_is_stored_as_its_bson_type() {
+    let opened: Result<crate::Database, Error> = database().await;
+    let made: Result<Time, Error> = Time::from_unix_micros(1760000000123456);
+    match opened {
+        Ok(db) => match made {
+            Ok(at) => {
+                let c = db.collection("every_type_round_trips_and_is_stored_as_its_bson_type");
+                assert(cleared(c).await);
+                let mut tags: HashMap<string, i32> = HashMap::new();
+                tags.insert("a", 1);
+                tags.insert("b", 2);
+                let doc = Everything {
+                    id: Uuid::new(),
+                    flag: true,
+                    name: "Ada",
+                    tiny: -8,
+                    short: -16,
+                    whole: -32,
+                    octet: 8,
+                    word: 16,
+                    long: -64,
+                    wide: 4000000000,
+                    big: 9223372036854775807,
+                    size: 7,
+                    ratio: 0.5,
+                    score: 2.25,
+                    at: at,
+                    data: Bytes::from_text("hello"),
+                    missing: None,
+                    present: Some(3),
+                    list: vec![1, 2, 3],
+                    place: Place { city: "London", zip: 1 },
+                    places: vec![Place { city: "Paris", zip: 2 }],
+                    tags: tags,
+                    color: Color::Blue,
+                };
+                let inserted: Result<string, Error> = c.insert(doc).await;
+                assert(inserted.is_ok());
+                let read: Result<Everything, Error> = c.one("{ _id: ? }", doc.id).await;
+                match read {
+                    Ok(got) => {
+                        assert_eq(got.id, doc.id);
+                        assert(got.flag);
+                        assert_eq(got.name, "Ada");
+                        assert_eq(got.tiny, -8);
+                        assert_eq(got.short, -16);
+                        assert_eq(got.whole, -32);
+                        assert_eq(got.octet, 8);
+                        assert_eq(got.word, 16);
+                        assert_eq(got.long, -64);
+                        assert_eq(got.wide, 4000000000);
+                        assert_eq(got.big, 9223372036854775807);
+                        assert_eq(got.size, 7);
+                        assert_eq(got.ratio, 0.5);
+                        assert_eq(got.score, 2.25);
+                        assert_eq(got.at.to_unix_micros(), 1760000000123000);
+                        assert(got.data == Bytes::from_text("hello"));
+                        assert(!got.missing.is_some());
+                        assert(got.present == Some(3));
+                        assert_eq(got.list, vec![1, 2, 3]);
+                        assert_eq(got.place.city, "London");
+                        assert_eq(got.place.zip, 1);
+                        assert_eq(got.places.len(), 1);
+                        assert_eq(got.tags.len(), 2);
+                        assert_eq(got.tags.get("b").unwrap_or(0), 2);
+                        match got.color {
+                            Color::Blue => assert(true),
+                            Color::Red => assert(false),
+                        }
+                    }
+                    Err(e) => assert_eq(e.message(), "no error"),
+                }
+                assert_eq(shown(c.count("{ flag: { $type: 'bool' }, name: { $type: 'string' } }").await), "1");
+                assert_eq(shown(c.count("{ tiny: { $type: 'int' }, short: { $type: 'int' }, whole: { $type: 'int' }, octet: { $type: 'int' }, word: { $type: 'int' } }").await), "1");
+                assert_eq(shown(c.count("{ long: { $type: 'long' }, wide: { $type: 'long' }, big: { $type: 'long' }, size: { $type: 'long' } }").await), "1");
+                assert_eq(shown(c.count("{ ratio: { $type: 'double' }, score: { $type: 'double' } }").await), "1");
+                assert_eq(shown(c.count("{ at: { $type: 'date' }, _id: { $type: 'binData' }, data: { $type: 'binData' } }").await), "1");
+                assert_eq(shown(c.count("{ missing: { $type: 'null' }, present: { $type: 'int' }, list: { $type: 'array' } }").await), "1");
+                assert_eq(shown(c.count("{ place: { $type: 'object' }, 'place.city': 'London', places: { $type: 'array' }, 'places.zip': 2 }").await), "1");
+                assert_eq(shown(c.count("{ tags: { $type: 'object' }, 'tags.a': 1, color: 'deep_blue' }").await), "1");
+                // A value compares equal only to the same BSON type and
+                // subtype: a `Uuid` to binary subtype 4, `Bytes` to subtype 0,
+                // a `Time` to a date in milliseconds.
+                let typed: Result<u64, Error> = c.count("{ _id: ?, data: ?, at: ? }", doc.id, doc.data, at).await;
+                match typed {
+                    Ok(n) => assert_eq(n, 1),
+                    Err(e) => assert_eq(e.message(), "no error"),
+                }
+            }
+            Err(e) => assert_eq(e.message(), "no error"),
+        },
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Counter {
+    name: string,
+    hits: u64,
+}
+
+#[test]
+async fn a_u64_above_the_largest_i64_is_an_error_naming_the_field() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_u64_above_the_largest_i64_is_an_error_naming_the_field");
+            assert(cleared(c).await);
+            let huge = Counter { name: "huge", hits: 18446744073709551615 };
+            let inserted: Result<string, Error> = c.insert(huge).await;
+            match inserted {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().contains("the field `hits` is above the largest `i64`"));
+                    assert(!e.message().contains("18446744073709551615"));
+                }
+            }
+            assert_eq(shown(c.count("{}").await), "0");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct MaybeId {
+    #[rename("_id")]
+    id: Option<string>,
+    name: string,
+}
+
+// Whether `id` is 24 hex digits, as an ObjectId's text is.
+fn is_object_id(id: string) -> bool {
+    let rest = id.replace("0", "").replace("1", "").replace("2", "").replace("3", "").replace("4", "").replace("5", "").replace("6", "").replace("7", "").replace("8", "").replace("9", "").replace("a", "").replace("b", "").replace("c", "").replace("d", "").replace("e", "").replace("f", "");
+    id.len() == 24 && rest.is_empty()
+}
+
+#[test]
+async fn a_made_object_id_is_given_as_hex_read_into_a_string_and_found_again() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_made_object_id_is_given_as_hex_read_into_a_string_and_found_again");
+            assert(cleared(c).await);
+            let no_id = Named { name: "no id" };
+            let first: Result<string, Error> = c.insert(no_id).await;
+            match first {
+                Ok(id) => assert(is_object_id(id)),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let none_id = MaybeId { id: None, name: "none id" };
+            let second: Result<string, Error> = c.insert(none_id).await;
+            match second {
+                Ok(id) => {
+                    assert(is_object_id(id));
+                    let found: Result<Option<MaybeId>, Error> = c.first("{ _id: ObjectId(?) }", id).await;
+                    match found {
+                        Ok(Some(doc)) => {
+                            assert_eq(doc.name, "none id");
+                            assert(doc.id == Some(id.clone()));
+                        }
+                        Ok(None) => assert(false),
+                        Err(e) => assert_eq(e.message(), "no error"),
+                    }
+                    // The text alone is a string, which no ObjectId equals.
+                    assert_eq(shown(c.count("{ _id: ? }", id).await), "0");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{ _id: { $type: 'objectId' } }").await), "2");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct FlagId {
+    #[rename("_id")]
+    id: bool,
+    name: string,
+}
+
+struct TimeId {
+    #[rename("_id")]
+    id: Time,
+    name: string,
+}
+
+struct TextId {
+    #[rename("_id")]
+    id: string,
+    name: string,
+}
+
+struct NumberId {
+    #[rename("_id")]
+    id: i64,
+    name: string,
+}
+
+#[test]
+async fn an_id_of_a_refused_kind_is_an_error_and_a_hex_string_id_stays_a_string() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("an_id_of_a_refused_kind_is_an_error_and_a_hex_string_id_stays_a_string");
+            assert(cleared(c).await);
+            let flag = FlagId { id: true, name: "flag" };
+            let flagged: Result<string, Error> = c.insert(flag).await;
+            match flagged {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "the `_id` must be a `string`, an integer, or a `Uuid`; this one is a `bool`"),
+            }
+            let timed = TimeId { id: Time::now(), name: "time" };
+            let timed_in: Result<string, Error> = c.insert(timed).await;
+            match timed_in {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("this one is a `Time`")),
+            }
+            assert_eq(shown(c.count("{}").await), "0");
+            let hex = TextId { id: "5f1d7a2b3c4d5e6f70819203", name: "hex" };
+            let hex_in: Result<string, Error> = c.insert(hex).await;
+            match hex_in {
+                Ok(id) => assert_eq(id, "5f1d7a2b3c4d5e6f70819203"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{ _id: { $type: 'string' }, name: 'hex' }").await), "1");
+            assert_eq(shown(c.count("{ _id: { $type: 'objectId' } }").await), "0");
+            let number = NumberId { id: 42, name: "number" };
+            let number_in: Result<string, Error> = c.insert(number).await;
+            match number_in {
+                Ok(id) => assert_eq(id, "42"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{ _id: 42, name: 'number' }").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_duplicate_key_gives_the_servers_code_and_message() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_duplicate_key_gives_the_servers_code_and_message");
+            assert(cleared(c).await);
+            let ada = Person { id: Uuid::new(), name: "Ada", age: 36 };
+            let first: Result<string, Error> = c.insert(ada).await;
+            assert(first.is_ok());
+            let again: Result<string, Error> = c.insert(ada).await;
+            match again {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().starts_with("E11000 duplicate key error"));
+                    assert(e.message().contains("(code 11000)"));
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn insert_many_gives_ids_in_order_and_stops_at_a_failing_document() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("insert_many_gives_ids_in_order_and_stops_at_a_failing_document");
+            assert(cleared(c).await);
+            let a = Uuid::new();
+            let b = Uuid::new();
+            let d = Uuid::new();
+            let people = vec![
+                Person { id: a, name: "a", age: 1 },
+                Person { id: b, name: "b", age: 2 },
+                Person { id: d, name: "d", age: 3 },
+            ];
+            let added: Result<Vec<string>, Error> = c.insert_many(people).await;
+            match added {
+                Ok(ids) => assert_eq(ids, vec![format!("{}", a), format!("{}", b), format!("{}", d)]),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let nobody: Vec<Person> = vec![];
+            let none_added: Result<Vec<string>, Error> = c.insert_many(nobody).await;
+            match none_added {
+                Ok(ids) => assert(ids.is_empty()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let made = vec![Named { name: "made" }];
+            let made_ids: Result<Vec<string>, Error> = c.insert_many(made).await;
+            match made_ids {
+                Ok(ids) => {
+                    assert_eq(ids.len(), 1);
+                    assert(ids.iter().all(|id| id.len() == 24));
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let clash = vec![
+                Person { id: Uuid::new(), name: "before", age: 4 },
+                Person { id: b, name: "clash", age: 5 },
+                Person { id: Uuid::new(), name: "after", age: 6 },
+            ];
+            let clashed: Result<Vec<string>, Error> = c.insert_many(clash).await;
+            match clashed {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().starts_with("document 2 of the list: E11000 duplicate key error"));
+                    assert(e.message().contains("(code 11000)"));
+                }
+            }
+            assert_eq(shown(c.count("{ name: 'before' }").await), "1");
+            assert_eq(shown(c.count("{ name: { $in: ['clash', 'after'] } }").await), "0");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct MaybeAge {
+    name: string,
+    age: Option<i32>,
+}
+
+struct TinyAge {
+    name: string,
+    age: i8,
+}
+
+struct TextKey {
+    name: string,
+    key: string,
+}
+
+struct UuidKey {
+    name: string,
+    key: Uuid,
+}
+
+struct TextColor {
+    name: string,
+    color: string,
+}
+
+struct Painted {
+    name: string,
+    color: Color,
+}
+
+#[test]
+async fn reading_a_field_that_does_not_fit_is_an_error_naming_it_without_its_value() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("reading_a_field_that_does_not_fit_is_an_error_naming_it_without_its_value");
+            assert(cleared(c).await);
+            let missing = Named { name: "missing" };
+            let null = MaybeAge { name: "null", age: None };
+            let big = Aged { name: "big", age: 300 };
+            let text_key = TextKey { name: "text key", key: "not-a-uuid-secret" };
+            let text_color = TextColor { name: "text color", color: "purple_secret" };
+            assert(c.insert(missing).await.is_ok());
+            assert(c.insert(null).await.is_ok());
+            assert(c.insert(big).await.is_ok());
+            assert(c.insert(text_key).await.is_ok());
+            assert(c.insert(text_color).await.is_ok());
+            let no_age: Result<Aged, Error> = c.one("{ name: 'missing' }").await;
+            match no_age {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("the document has no field `age`")),
+            }
+            let null_age: Result<Aged, Error> = c.one("{ name: 'null' }").await;
+            match null_age {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("the field `age` is null")),
+            }
+            let null_read: Result<MaybeAge, Error> = c.one("{ name: 'null' }").await;
+            match null_read {
+                Ok(doc) => assert(!doc.age.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let too_big: Result<TinyAge, Error> = c.one("{ name: 'big' }").await;
+            match too_big {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().contains("`age`"));
+                    assert(!e.message().contains("300"));
+                }
+            }
+            let not_uuid: Result<UuidKey, Error> = c.one("{ name: 'text key' }").await;
+            match not_uuid {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().contains("`key`"));
+                    assert(!e.message().contains("secret"));
+                }
+            }
+            let unknown: Result<Painted, Error> = c.one("{ name: 'text color' }").await;
+            match unknown {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().contains("`color`"));
+                    assert(!e.message().contains("secret"));
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn the_number_of_values_must_be_the_number_of_question_marks() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("the_number_of_values_must_be_the_number_of_question_marks");
+            let two: Result<Option<Named>, Error> = c.first("{ name: ? }", "a", "b").await;
+            match two {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "this call's texts take 1 value, one for each `?`, but 2 values were given"),
+            }
+            let none: Result<Option<Named>, Error> = c.first("{ name: ? }").await;
+            match none {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "this call's texts take 1 value, one for each `?`, but 0 values were given"),
+            }
+            let counted: Result<u64, Error> = c.count("{}", 1).await;
+            match counted {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "this call's texts take 0 values, one for each `?`, but 1 value was given"),
+            }
+            let found: Result<Vec<Named>, Error> = c.find("{ a: ?, b: ? }", 1).sort("{ a: 1 }").all().await;
+            match found {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "this call's texts take 2 values, one for each `?`, but 1 value was given"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_regex_value_matches_only_its_own_text() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_regex_value_matches_only_its_own_text");
+            assert(cleared(c).await);
+            let names = vec![Named { name: "Ada" }, Named { name: "x.*y" }];
+            assert(c.insert_many(names).await.is_ok());
+            let found: Result<Option<Named>, Error> = c.first("{ name: { $regex: ? } }", ".*").await;
+            match found {
+                Ok(Some(doc)) => assert_eq(doc.name, "x.*y"),
+                Ok(None) => assert(false),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{ name: { $regex: ? } }", ".*").await), "1");
+            assert_eq(shown(c.count("{ name: { $regex: ?, $options: 'i' } }", "ADA").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// `$regularExpression` in a text is an ordinary key, so a value under it
+// never becomes a pattern: the server reads the document as it is.
+#[test]
+async fn a_regular_expression_key_reaches_the_server_as_a_plain_document() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_regular_expression_key_reaches_the_server_as_a_plain_document");
+            assert(cleared(c).await);
+            let ada = Named { name: "Ada" };
+            assert(c.insert(ada).await.is_ok());
+            let found: Result<Option<Named>, Error> = c.first("{ name: { $regularExpression: { pattern: ?, options: '' } } }", "^A").await;
+            match found {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "unknown operator: $regularExpression (code 2)"),
+            }
+            let plain: Result<Option<Named>, Error> = c.first("{ name: { $eq: { $regularExpression: { pattern: ?, options: '' } } } }", "^A").await;
+            match plain {
+                Ok(doc) => assert(!doc.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// The answer of a call giving `true` or `false`, as text, or its message
+// when it failed, so a failing check shows why.
+fn answered(result: Result<bool, Error>) -> string {
+    match result {
+        Ok(yes) => format!("{}", yes),
+        Err(e) => e.message().clone(),
+    }
+}
+
+// The number of documents a call read, as text, or its message when it
+// failed.
+fn listed(result: Result<Vec<Named>, Error>) -> string {
+    match result {
+        Ok(found) => format!("{}", found.len()),
+        Err(e) => e.message().clone(),
+    }
+}
+
+// Whether `message` is the allowlist's refusal of a `?` at `place`, as
+// "the filter text, at character 9:".
+fn refused(message: string, place: string) -> bool {
+    message.starts_with(place) && message.contains("a value can stand only in a filter, a `$match` stage, a value of `$set` or a like update operator, or `$skip` and `$limit`")
+}
+
+#[test]
+async fn update_and_update_many_give_the_number_matched() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("update_and_update_many_give_the_number_matched");
+            assert(cleared(c).await);
+            let people = vec![Aged { name: "Ada", age: 36 }, Aged { name: "Alan", age: 41 }, Aged { name: "Grace", age: 45 }];
+            assert(c.insert_many(people).await.is_ok());
+            assert_eq(shown(c.update("{ name: 'Ada' }", "{ $set: { age: 37 } }").await), "1");
+            assert_eq(shown(c.update("{ name: ? }", "{ $set: { age: ? } }", "Alan", 42).await), "1");
+            assert_eq(shown(c.update("{ name: ? }", "{ $set: { age: ? } }", "Nobody", 1).await), "0");
+            // `update` changes only the first of several matches.
+            assert_eq(shown(c.update("{}", "{ $set: { first: true } }").await), "1");
+            assert_eq(shown(c.count("{ first: true }").await), "1");
+            assert_eq(shown(c.update_many("{ age: { $gt: ? } }", "{ $inc: { age: ? } }", 40, 1).await), "2");
+            assert_eq(shown(c.update_many("{}", "{ $set: { seen: true } }").await), "3");
+            // The number matched, not the number changed.
+            assert_eq(shown(c.update_many("{}", "{ $set: { seen: true } }").await), "3");
+            assert_eq(shown(c.update_many("{ name: ? }", "{ $set: { seen: false } }", "Nobody").await), "0");
+            let alan: Result<Aged, Error> = c.one("{ name: 'Alan' }").await;
+            match alan {
+                Ok(p) => assert_eq(p.age, 43),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let ada: Result<Aged, Error> = c.one("{ name: 'Ada' }").await;
+            match ada {
+                Ok(p) => assert_eq(p.age, 37),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn delete_and_delete_many_give_the_number_deleted() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("delete_and_delete_many_give_the_number_deleted");
+            assert(cleared(c).await);
+            let people = vec![Aged { name: "Ada", age: 36 }, Aged { name: "Alan", age: 41 }, Aged { name: "Grace", age: 45 }, Aged { name: "Linus", age: 50 }];
+            assert(c.insert_many(people).await.is_ok());
+            assert_eq(shown(c.delete("{ name: ? }", "Ada").await), "1");
+            assert_eq(shown(c.delete("{ name: ? }", "Ada").await), "0");
+            // `delete` removes only the first of several matches.
+            assert_eq(shown(c.delete("{ age: { $gt: 40 } }").await), "1");
+            assert_eq(shown(c.count("{}").await), "2");
+            assert_eq(shown(c.delete_many("{ age: { $gte: ?, $lte: ? } }", 0, 200).await), "2");
+            assert_eq(shown(c.delete_many("{ name: ? }", "Nobody").await), "0");
+            let more = vec![Aged { name: "Edsger", age: 72 }, Aged { name: "Barbara", age: 84 }];
+            assert(c.insert_many(more).await.is_ok());
+            assert_eq(shown(c.delete_many("{}").await), "2");
+            assert_eq(shown(c.delete_many("{}").await), "0");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn upsert_inserts_and_then_updates() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("upsert_inserts_and_then_updates");
+            assert(cleared(c).await);
+            assert_eq(answered(c.upsert("{ name: ? }", "{ $set: { age: ? } }", "Ada", 36).await), "true");
+            assert_eq(answered(c.upsert("{ name: ? }", "{ $set: { age: ? } }", "Ada", 37).await), "false");
+            assert_eq(shown(c.count("{}").await), "1");
+            let ada: Result<Aged, Error> = c.one("{ name: 'Ada' }").await;
+            match ada {
+                Ok(p) => assert_eq(p.age, 37),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(answered(c.upsert("{ name: 'Alan' }", "{ $setOnInsert: { age: 41 } }").await), "true");
+            assert_eq(answered(c.upsert("{ name: 'Alan' }", "{ $setOnInsert: { age: 99 } }").await), "false");
+            let alan: Result<Aged, Error> = c.one("{ name: 'Alan' }").await;
+            match alan {
+                Ok(p) => assert_eq(p.age, 41),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{}").await), "2");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn replace_matches_by_the_documents_own_id_and_needs_one() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("replace_matches_by_the_documents_own_id_and_needs_one");
+            assert(cleared(c).await);
+            let ada = Person { id: Uuid::new(), name: "Ada", age: 36 };
+            assert(c.insert(ada).await.is_ok());
+            let older = Person { id: ada.id, name: "Ada Lovelace", age: 37 };
+            assert_eq(answered(c.replace(older).await), "true");
+            let found: Result<Person, Error> = c.one("{ _id: ? }", ada.id).await;
+            match found {
+                Ok(p) => {
+                    assert_eq(p.name, "Ada Lovelace");
+                    assert_eq(p.age, 37);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let stranger = Person { id: Uuid::new(), name: "Nobody", age: 1 };
+            assert_eq(answered(c.replace(stranger).await), "false");
+            assert_eq(shown(c.count("{}").await), "1");
+            let no_id = Named { name: "no id" };
+            assert_eq(answered(c.replace(no_id).await), "`replace` finds the document to replace by its `_id`, and this one has no `_id` or a `None` one");
+            let none_id = MaybeId { id: None, name: "none id" };
+            assert_eq(answered(c.replace(none_id).await), "`replace` finds the document to replace by its `_id`, and this one has no `_id` or a `None` one");
+            assert_eq(shown(c.count("{}").await), "1");
+            // An ObjectId read into a `string` is written back as a string,
+            // which matches nothing (spec section 7).
+            let made = Named { name: "made" };
+            let made_id: Result<string, Error> = c.insert(made).await;
+            match made_id {
+                Ok(id) => {
+                    let as_text = MaybeId { id: Some(id.clone()), name: "renamed" };
+                    assert_eq(answered(c.replace(as_text).await), "false");
+                    assert_eq(shown(c.count("{ _id: ObjectId(?), name: 'made' }", id).await), "1");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Resident {
+    name: string,
+    age: i32,
+    city: string,
+}
+
+#[test]
+async fn aggregate_reads_into_a_struct_and_into_a_scalar() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("aggregate_reads_into_a_struct_and_into_a_scalar");
+            assert(cleared(c).await);
+            let people = vec![
+                Resident { name: "Ada", age: 36, city: "London" },
+                Resident { name: "Alan", age: 41, city: "London" },
+                Resident { name: "Grace", age: 45, city: "Arlington" },
+            ];
+            assert(c.insert_many(people).await.is_ok());
+            let grown: Result<Vec<Aged>, Error> = c.aggregate("[{ $match: { age: { $gte: ? } } }, { $sort: { name: 1 } }]", 40).await;
+            match grown {
+                Ok(found) => {
+                    let names: Vec<string> = found.iter().map(|p| p.name.clone()).collect();
+                    assert_eq(names, vec!["Alan", "Grace"]);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let londoners: Result<Vec<Aged>, Error> = c.aggregate("[{ $match: { city: ?, age: { $lt: ? } } }]", "London", 40).await;
+            match londoners {
+                Ok(found) => {
+                    let names: Vec<string> = found.iter().map(|p| p.name.clone()).collect();
+                    assert_eq(names, vec!["Ada"]);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let total: Result<Vec<i64>, Error> = c.aggregate("[{ $group: { _id: null, total: { $sum: '$age' } } }]").await;
+            match total {
+                Ok(found) => assert_eq(found, vec![122]),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let cities: Result<Vec<string>, Error> = c.aggregate("[{ $group: { _id: '$city' } }, { $sort: { _id: 1 } }]").await;
+            match cities {
+                Ok(found) => assert_eq(found, vec!["Arlington", "London"]),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let page: Result<Vec<Aged>, Error> = c.aggregate("[{ $sort: { age: 1 } }, { $skip: ? }, { $limit: ? }]", 1, 1).await;
+            match page {
+                Ok(found) => {
+                    let names: Vec<string> = found.iter().map(|p| p.name.clone()).collect();
+                    assert_eq(names, vec!["Alan"]);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let nothing: Result<Vec<Aged>, Error> = c.aggregate("[{ $match: { city: ? } }]", "Paris").await;
+            match nothing {
+                Ok(found) => assert(found.is_empty()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_value_where_mongodb_reads_a_path_a_name_or_syntax_is_refused() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_value_where_mongodb_reads_a_path_a_name_or_syntax_is_refused");
+            assert(cleared(c).await);
+            let ada = Named { name: "Ada" };
+            assert(c.insert(ada).await.is_ok());
+            let under_expr = shown(c.count("{ $expr: { $eq: ['$a', ?] } }", 1).await);
+            assert(refused(under_expr, "the filter text, at character 24:"));
+            let schema = shown(c.count("{ $jsonSchema: { properties: { name: { pattern: ? } } } }", "^A").await);
+            assert(refused(schema, "the filter text, at character 49:"));
+            let added: Result<Vec<Named>, Error> = c.aggregate("[{ $addFields: { b: ? } }]", 1).await;
+            assert(refused(listed(added), "the pipeline text, at character 21:"));
+            let from: Result<Vec<Named>, Error> = c.aggregate("[{ $lookup: { from: ?, localField: 'a', foreignField: 'a', as: 'joined' } }]", "users").await;
+            assert(refused(listed(from), "the pipeline text, at character 21:"));
+            let inner: Result<Vec<Named>, Error> = c.aggregate("[{ $lookup: { from: 'other', pipeline: [{ $match: { a: ? } }], as: 'joined' } }]", 1).await;
+            assert(refused(listed(inner), "the pipeline text, at character 56:"));
+            let search: Result<Vec<Named>, Error> = c.aggregate("[{ $search: { text: { query: ?, path: 'name' } } }]", "ada").await;
+            assert(refused(listed(search), "the pipeline text, at character 30:"));
+            let facet: Result<Vec<Named>, Error> = c.aggregate("[{ $facet: { a: [{ $match: { a: ? } }] } }]", 1).await;
+            assert(refused(listed(facet), "the pipeline text, at character 33:"));
+            let renamed = shown(c.update("{}", "{ $rename: { name: ? } }", "secret").await);
+            assert(refused(renamed, "the update text, at character 20:"));
+            let unset = shown(c.update("{}", "{ $unset: { name: ? } }", "").await);
+            assert(refused(unset, "the update text, at character 19:"));
+            let staged = shown(c.update("{}", "[{ $set: { name: ? } }]", "$secret").await);
+            assert(refused(staged, "the update text, at character 18:"));
+            let staged_many = shown(c.update_many("{}", "[{ $set: { name: ? } }]", "$secret").await);
+            assert(refused(staged_many, "the update text, at character 18:"));
+            let staged_upsert = answered(c.upsert("{}", "[{ $set: { name: ? } }]", "$secret").await);
+            assert(refused(staged_upsert, "the update text, at character 18:"));
+            // Nothing was sent: the document is as it was.
+            assert_eq(shown(c.count("{ name: 'Ada' }").await), "1");
+            assert_eq(shown(c.count("{}").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Profile {
+    nick: string,
+    city: string,
+}
+
+struct Member {
+    name: string,
+    profile: Profile,
+    tags: Vec<string>,
+}
+
+#[test]
+async fn a_value_is_taken_where_mongodb_reads_plain_data() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_value_is_taken_where_mongodb_reads_plain_data");
+            assert(cleared(c).await);
+            let ada = Member { name: "Ada", profile: Profile { nick: "ada", city: "London" }, tags: vec!["a", "b", "c"] };
+            assert(c.insert(ada).await.is_ok());
+            assert_eq(shown(c.update("{ name: ? }", "{ $set: { profile: { nick: ?, city: ? } } }", "Ada", "countess", "Marylebone").await), "1");
+            assert_eq(shown(c.update("{ name: ? }", "{ $push: { tags: { $each: [?, ?] } } }", "Ada", "d", "e").await), "1");
+            assert_eq(shown(c.update("{ name: ? }", "{ $pull: { tags: { $in: [?, ?] } } }", "Ada", "a", "c").await), "1");
+            assert_eq(shown(c.update("{ name: ? }", "{ $addToSet: { tags: ? } }", "Ada", "b").await), "1");
+            let found: Result<Member, Error> = c.one("{ name: 'Ada' }").await;
+            match found {
+                Ok(m) => {
+                    assert_eq(m.profile.nick, "countess");
+                    assert_eq(m.profile.city, "Marylebone");
+                    assert_eq(m.tags, vec!["b", "d", "e"]);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{ 'profile.city': ? }", "Marylebone").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Letter {
+    from: string,
+    to: string,
+}
+
+#[test]
+async fn a_filter_on_a_field_named_from_takes_a_value() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_filter_on_a_field_named_from_takes_a_value");
+            assert(cleared(c).await);
+            let letter = Letter { from: "ada", to: "alan" };
+            assert(c.insert(letter).await.is_ok());
+            assert_eq(shown(c.count("{ from: ? }", "ada").await), "1");
+            let matched: Result<Vec<Letter>, Error> = c.aggregate("[{ $match: { from: ? } }]", "ada").await;
+            match matched {
+                Ok(found) => assert_eq(found.len(), 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.update("{ from: ? }", "{ $set: { to: ? } }", "ada", "grace").await), "1");
+            assert_eq(shown(c.count("{ to: 'grace' }").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_value_under_text_search_is_taken() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_value_under_text_search_is_taken");
+            assert(cleared(c).await);
+            assert_eq(answered(c.create_index("{ name: 'text' }", "{}").await), "true");
+            let names = vec![Named { name: "Ada Lovelace" }, Named { name: "Alan Turing" }, Named { name: "Alan Kay" }];
+            assert(c.insert_many(names).await.is_ok());
+            assert_eq(shown(c.count("{ $text: { $search: ? } }", "lovelace").await), "1");
+            assert_eq(shown(c.count("{ $text: { $search: ? } }", "alan").await), "2");
+            assert_eq(shown(c.count("{ $text: { $search: ? } }", "\"Alan Turing\"").await), "1");
+            assert_eq(shown(c.count("{ $text: { $search: ? } }", "alan -kay").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Nicked {
+    name: string,
+    nick: Option<string>,
+}
+
+#[test]
+async fn a_dollar_string_value_stays_text() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_dollar_string_value_stays_text");
+            assert(cleared(c).await);
+            let people = vec![Aged { name: "$secret", age: 1 }, Aged { name: "Ada", age: 36 }];
+            assert(c.insert_many(people).await.is_ok());
+            assert_eq(shown(c.count("{ name: ? }", "$secret").await), "1");
+            let matched: Result<Vec<Aged>, Error> = c.aggregate("[{ $match: { name: ? } }]", "$secret").await;
+            match matched {
+                Ok(found) => {
+                    let ages: Vec<i32> = found.iter().map(|p| p.age).collect();
+                    assert_eq(ages, vec![1]);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            // `$name` would be Ada's name were it read as a field path.
+            assert_eq(shown(c.update("{ name: 'Ada' }", "{ $set: { nick: ? } }", "$name").await), "1");
+            assert_eq(shown(c.update("{ name: '$secret' }", "{ $set: { nick: ? } }", "$secret").await), "1");
+            let ada: Result<Nicked, Error> = c.one("{ name: 'Ada' }").await;
+            match ada {
+                Ok(p) => assert(p.nick == Some("$name")),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{ nick: '$secret' }").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Session {
+    token: string,
+}
+
+struct Account {
+    name: string,
+    sessions: Vec<Session>,
+}
+
+#[test]
+async fn a_none_value_cannot_be_matched_and_set_stores_it_as_null() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_none_value_cannot_be_matched_and_set_stores_it_as_null");
+            assert(cleared(c).await);
+            let ada = Account { name: "Ada", sessions: vec![Session { token: "t1" }, Session { token: "t2" }] };
+            assert(c.insert(ada).await.is_ok());
+            let none: Option<string> = None;
+            assert_eq(shown(c.count("{ reset_token: ? }", none).await), "value 1, at character 16 of the filter text: a `None` value cannot be matched; write `null` in the text to match a missing or null field");
+            assert_eq(shown(c.update("{ name: ? }", "{ $pull: { sessions: { token: ? } } }", "Ada", none).await), "value 2, at character 31 of the update text: a `None` value cannot be matched; write `null` in the text to match a missing or null field");
+            let matched: Result<Vec<Named>, Error> = c.aggregate("[{ $match: { name: ? } }]", none).await;
+            assert_eq(listed(matched), "value 1, at character 20 of the pipeline text: a `None` value cannot be matched; write `null` in the text to match a missing or null field");
+            let kept: Result<Account, Error> = c.one("{ name: 'Ada' }").await;
+            match kept {
+                Ok(a) => assert_eq(a.sessions.len(), 2),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.update("{ name: ? }", "{ $set: { nick: ? } }", "Ada", none).await), "1");
+            assert_eq(shown(c.count("{ nick: { $type: 'null' } }").await), "1");
+            let nicked: Result<Nicked, Error> = c.one("{ name: 'Ada' }").await;
+            match nicked {
+                Ok(p) => assert(!p.nick.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Signup {
+    email: string,
+    at: Time,
+}
+
+#[test]
+async fn create_index_twice_an_unknown_option_and_a_value_in_its_texts() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("create_index_twice_an_unknown_option_and_a_value_in_its_texts");
+            assert(cleared(c).await);
+            assert_eq(answered(c.create_index("{ email: 1 }", "{ unique: true }").await), "true");
+            assert_eq(answered(c.create_index("{ email: 1 }", "{ unique: true }").await), "true");
+            assert_eq(answered(c.create_index("{ at: 1 }", "{ expireAfterSeconds: 3600, name: 'signup_ttl', sparse: true }").await), "true");
+            let ada = Signup { email: "ada@example.com", at: Time::now() };
+            assert(c.insert(ada).await.is_ok());
+            let again: Result<string, Error> = c.insert(ada).await;
+            match again {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().starts_with("E11000 duplicate key error"));
+                    assert(e.message().contains("email_1"));
+                }
+            }
+            assert_eq(answered(c.create_index("{ email: 1 }", "{ uniq: true }").await), "`uniq` is not an index option; the options are `unique`, `name`, `sparse`, and `expireAfterSeconds`");
+            assert_eq(answered(c.create_index("{ email: 1 }", "{ unique: 'yes' }").await), "the index option `unique` takes `true` or `false`");
+            assert_eq(answered(c.create_index("{ email: 1 }", "{ name: 1 }").await), "the index option `name` takes a quoted string");
+            assert_eq(answered(c.create_index("{ at: 1 }", "{ expireAfterSeconds: -1 }").await), "the index option `expireAfterSeconds` takes a whole number of seconds from 0 up");
+            assert(refused(answered(c.create_index("{ email: ? }", "{}").await), "the index keys text, at character 10:"));
+            assert(refused(answered(c.create_index("{ email: 1 }", "{ name: ? }").await), "the index options text, at character 9:"));
+            // The same keys with other options are the server's error.
+            let other = answered(c.create_index("{ email: 1 }", "{ unique: false }").await);
+            assert(other.contains("(code "));
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Converted {
+    whole: i64,
+}
+
+struct Halved {
+    half: i64,
+}
+
+struct Exact {
+    exact: string,
+}
+
+#[test]
+async fn an_update_pipelines_conversions_read_back() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("an_update_pipelines_conversions_read_back");
+            assert(cleared(c).await);
+            let three = Numbered { n: 3 };
+            assert(c.insert(three).await.is_ok());
+            assert_eq(shown(c.update("{ n: 3 }", "[{ $set: { whole: { $toDouble: '$n' }, half: { $divide: ['$n', 2] }, exact: { $toDecimal: '$n' } } }]").await), "1");
+            assert_eq(shown(c.count("{ whole: { $type: 'double' }, half: { $type: 'double' }, exact: { $type: 'decimal' } }").await), "1");
+            let whole: Result<Converted, Error> = c.one("{}").await;
+            match whole {
+                Ok(doc) => assert_eq(doc.whole, 3),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let half: Result<Halved, Error> = c.one("{}").await;
+            match half {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().contains("`half`"));
+                    assert(e.message().contains("fractional"));
+                    assert(!e.message().contains("1.5"));
+                }
+            }
+            let exact: Result<Exact, Error> = c.one("{}").await;
+            match exact {
+                Ok(doc) => assert_eq(doc.exact, "3"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn the_values_of_an_update_fill_its_filter_and_then_its_update() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("the_values_of_an_update_fill_its_filter_and_then_its_update");
+            assert(cleared(c).await);
+            let ada = Aged { name: "Ada", age: 36 };
+            assert(c.insert(ada).await.is_ok());
+            assert_eq(shown(c.update("{ name: ? }", "{ $set: { age: ? } }", "Ada").await), "this call's texts take 2 values, one for each `?`, but 1 value was given");
+            assert_eq(shown(c.update("{ name: ? }", "{ $set: { age: ? } }", "Ada", 40, 41).await), "this call's texts take 2 values, one for each `?`, but 3 values were given");
+            assert_eq(shown(c.update_many("{ name: 'Ada' }", "{ $set: { age: ? } }").await), "this call's texts take 1 value, one for each `?`, but 0 values were given");
+            assert_eq(answered(c.upsert("{ name: ? }", "{ $set: { age: 1 } }").await), "this call's texts take 1 value, one for each `?`, but 0 values were given");
+            assert_eq(shown(c.delete("{ name: ? }").await), "this call's texts take 1 value, one for each `?`, but 0 values were given");
+            let counted: Result<Vec<Named>, Error> = c.aggregate("[{ $match: { name: ? } }]").await;
+            assert_eq(listed(counted), "this call's texts take 1 value, one for each `?`, but 0 values were given");
+            assert_eq(shown(c.update("{}", "{ name: ? }", "x").await), "the update text, at character 3: each top-level key of an update starts with `$`, as `$set`; `replace` is the call for a whole document");
+            assert_eq(shown(c.count("{ age: 36 }").await), "1");
+            assert_eq(shown(c.update("{ name: ? }", "{ $set: { name: ?, age: ? } }", "Ada", "Ada Lovelace", 40).await), "1");
+            let found: Result<Aged, Error> = c.one("{}").await;
+            match found {
+                Ok(p) => {
+                    assert_eq(p.name, "Ada Lovelace");
+                    assert_eq(p.age, 40);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// The number of ids an `insert_many` gave, as text, or its message when
+// it failed.
+fn added(result: Result<Vec<string>, Error>) -> string {
+    match result {
+        Ok(ids) => format!("{}", ids.len()),
+        Err(e) => e.message().clone(),
+    }
+}
+
+// The message of an `insert` that should fail, or "no error" when it did
+// not.
+fn inserted(result: Result<string, Error>) -> string {
+    match result {
+        Ok(_) => "no error",
+        Err(e) => e.message().clone(),
+    }
+}
+
+// What a transaction running every call of a collection saw: through
+// its collections, and outside it before `commit`.
+struct EveryCall {
+    ids: usize,
+    upserted: bool,
+    replaced: bool,
+    deleted: u64,
+    deleted_many: u64,
+    inside: u64,
+    outside: u64,
+    alan: i32,
+    missing: bool,
+    ages: Vec<i32>,
+    grown: Vec<string>,
+    committed: bool,
+}
+
+// Runs every call of a collection inside one transaction and commits it.
+async fn every_call_in_a_transaction(db: crate::Database) -> Result<EveryCall, Error> {
+    let mut tx = db.begin().await?;
+    let c = tx.collection("a_transaction_runs_every_call_and_commits");
+    let outside = db.collection("a_transaction_runs_every_call_and_commits");
+    let id = Uuid::new();
+    let ada = Person { id: id, name: "Ada", age: 36 };
+    let _ada = c.insert(ada).await?;
+    let more = vec![Aged { name: "Alan", age: 41 }, Aged { name: "Grace", age: 45 }, Aged { name: "Linus", age: 50 }];
+    let ids = c.insert_many(more).await?;
+    let _ada_aged = c.update("{ name: ? }", "{ $set: { age: ? } }", "Ada", 37).await?;
+    let _older = c.update_many("{ age: { $gt: ? } }", "{ $inc: { age: 1 } }", 40).await?;
+    let upserted = c.upsert("{ name: ? }", "{ $set: { age: ? } }", "Edsger", 72).await?;
+    let renamed = Person { id: id, name: "Ada Lovelace", age: 37 };
+    let replaced = c.replace(renamed).await?;
+    let deleted = c.delete("{ name: ? }", "Linus").await?;
+    let deleted_many = c.delete_many("{ name: ? }", "Edsger").await?;
+    let inside = c.count("{}").await?;
+    let seen = outside.count("{}").await?;
+    let alan: Aged = c.one("{ name: ? }", "Alan").await?;
+    let nobody: Option<Aged> = c.first("{ name: 'Nobody' }").await?;
+    let sorted: Vec<Aged> = c.find("{}").sort("{ age: 1 }").all().await?;
+    let grown: Vec<Aged> = c.aggregate("[{ $match: { age: { $gte: ? } } }, { $sort: { name: 1 } }]", 40).await?;
+    let committed = tx.commit().await?;
+    Ok(EveryCall {
+        ids: ids.len(),
+        upserted: upserted,
+        replaced: replaced,
+        deleted: deleted,
+        deleted_many: deleted_many,
+        inside: inside,
+        outside: seen,
+        alan: alan.age,
+        missing: !nobody.is_some(),
+        ages: sorted.iter().map(|p| p.age).collect(),
+        grown: grown.iter().map(|p| p.name.clone()).collect(),
+        committed: committed,
+    })
+}
+
+#[test]
+async fn a_transaction_runs_every_call_and_commits() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_transaction_runs_every_call_and_commits");
+            assert(cleared(c).await);
+            let ran: Result<EveryCall, Error> = every_call_in_a_transaction(db).await;
+            match ran {
+                Ok(seen) => {
+                    assert_eq(seen.ids, 3);
+                    assert(seen.upserted);
+                    assert(seen.replaced);
+                    assert_eq(seen.deleted, 1);
+                    assert_eq(seen.deleted_many, 1);
+                    assert_eq(seen.inside, 3);
+                    // Nothing shows outside the transaction before `commit`.
+                    assert_eq(seen.outside, 0);
+                    assert_eq(seen.alan, 42);
+                    assert(seen.missing);
+                    assert_eq(seen.ages, vec![37, 42, 46]);
+                    assert_eq(seen.grown, vec!["Alan", "Grace"]);
+                    assert(seen.committed);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{}").await), "3");
+            assert_eq(shown(c.count("{ name: 'Ada Lovelace', age: 37 }").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// What a second `commit`, and a call on a committed transaction's
+// collection, give.
+struct AfterCommit {
+    committed: bool,
+    again: string,
+    call: string,
+    insert: string,
+    empty: string,
+}
+
+// Commits a transaction with one insert, then commits it again and calls
+// its collection.
+async fn commit_twice_and_call(db: crate::Database) -> Result<AfterCommit, Error> {
+    let mut tx = db.begin().await?;
+    let c = tx.collection("a_committed_transaction_is_finished");
+    let ada = Aged { name: "Ada", age: 36 };
+    let _ada = c.insert(ada).await?;
+    let committed = tx.commit().await?;
+    let again = answered(tx.commit().await);
+    let call = shown(c.count("{}").await);
+    let alan = Aged { name: "Alan", age: 41 };
+    let insert = inserted(c.insert(alan).await);
+    let nobody: Vec<Aged> = vec![];
+    let empty = added(c.insert_many(nobody).await);
+    Ok(AfterCommit { committed: committed, again: again, call: call, insert: insert, empty: empty })
+}
+
+#[test]
+async fn a_committed_transaction_is_finished() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_committed_transaction_is_finished");
+            assert(cleared(c).await);
+            let ran: Result<AfterCommit, Error> = commit_twice_and_call(db).await;
+            match ran {
+                Ok(after) => {
+                    assert(after.committed);
+                    assert_eq(after.again, "this transaction is finished");
+                    assert_eq(after.call, "this transaction is finished");
+                    assert_eq(after.insert, "this transaction is finished");
+                    assert_eq(after.empty, "this transaction is finished");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{}").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Inserts `person` in a transaction and drops the transaction without
+// `commit`.
+async fn insert_and_drop(db: crate::Database, person: Person) -> Result<string, Error> {
+    let tx = db.begin().await?;
+    let c = tx.collection("a_dropped_transaction_rolls_back_at_once");
+    c.insert(person).await
+}
+
+#[test]
+async fn a_dropped_transaction_rolls_back_at_once() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_dropped_transaction_rolls_back_at_once");
+            assert(cleared(c).await);
+            let id = Uuid::new();
+            let ada = Person { id: id, name: "Ada", age: 36 };
+            assert_eq(inserted(insert_and_drop(db, ada).await), "no error");
+            assert_eq(shown(c.count("{}").await), "0");
+            // An open transaction holding the `_id` would make this insert
+            // wait for it, up to the server's 60-second limit.
+            let started = Time::now();
+            let again = Person { id: id, name: "Ada", age: 36 };
+            assert_eq(inserted(c.insert(again).await), "no error");
+            let waited = Time::now().to_unix_micros() - started.to_unix_micros();
+            assert(waited < 10000000);
+            assert_eq(shown(c.count("{}").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// What a transaction gives after one of its calls failed on the server.
+struct AfterFailure {
+    failure: string,
+    later: string,
+    empty: string,
+    commit: string,
+    again: string,
+    after: string,
+}
+
+// Inserts a document and then a duplicate of `taken`'s `_id` in one
+// transaction, and goes on after the failure.
+async fn fail_and_commit(db: crate::Database, taken: Uuid) -> Result<AfterFailure, Error> {
+    let mut tx = db.begin().await?;
+    let c = tx.collection("a_failed_transaction_rolls_back_at_commit");
+    let grace = Aged { name: "Grace", age: 45 };
+    let _grace = c.insert(grace).await?;
+    let duplicate = Person { id: taken, name: "Ada", age: 36 };
+    let failure = inserted(c.insert(duplicate).await);
+    let later = shown(c.count("{}").await);
+    let nobody: Vec<Aged> = vec![];
+    let empty = added(c.insert_many(nobody).await);
+    let commit = answered(tx.commit().await);
+    let again = answered(tx.commit().await);
+    let after = shown(c.count("{}").await);
+    Ok(AfterFailure { failure: failure, later: later, empty: empty, commit: commit, again: again, after: after })
+}
+
+#[test]
+async fn a_failed_transaction_rolls_back_at_commit() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_failed_transaction_rolls_back_at_commit");
+            assert(cleared(c).await);
+            let id = Uuid::new();
+            let ada = Person { id: id, name: "Ada", age: 36 };
+            assert_eq(inserted(c.insert(ada).await), "no error");
+            let ran: Result<AfterFailure, Error> = fail_and_commit(db, id).await;
+            match ran {
+                Ok(after) => {
+                    assert(after.failure.starts_with("E11000 duplicate key error"));
+                    assert(after.failure.contains("(code 11000); the transaction will roll back"));
+                    assert_eq(after.later, "a call in this transaction failed; it will roll back");
+                    assert_eq(after.empty, "a call in this transaction failed; it will roll back");
+                    assert_eq(after.commit, "the transaction was rolled back: a call in it failed");
+                    assert_eq(after.again, "this transaction is finished");
+                    assert_eq(after.after, "this transaction is finished");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            // Grace's insert rolled back with the transaction.
+            assert_eq(shown(c.count("{}").await), "1");
+            assert_eq(shown(c.count("{ name: 'Grace' }").await), "0");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+fn dollar_replacement() -> string {
+    "a replacement document cannot start with a key that begins with `$`, which MongoDB reads as an update; `update` is the call for that"
+}
+
+async fn dollar_replacement_in_a_transaction(db: crate::Database) -> Result<string, Error> {
+    let mut tx = db.begin().await?;
+    let c = tx.collection("a_replacement_starting_with_a_dollar_key_is_refused");
+    let mut doc: HashMap<string, string> = HashMap::new();
+    doc.insert("$set", "x");
+    let refused = answered(c.replace(doc).await);
+    let ada = Aged { name: "Ada", age: 36 };
+    let _ada = c.insert(ada).await?;
+    let committed = tx.commit().await?;
+    if committed {
+        return Ok(refused);
+    }
+    Ok("not committed")
+}
+
+#[test]
+async fn a_replacement_starting_with_a_dollar_key_is_refused() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_replacement_starting_with_a_dollar_key_is_refused");
+            assert(cleared(c).await);
+            let mut doc: HashMap<string, string> = HashMap::new();
+            doc.insert("$set", "x");
+            assert_eq(answered(c.replace(doc).await), dollar_replacement());
+            let ran: Result<string, Error> = dollar_replacement_in_a_transaction(db).await;
+            match ran {
+                Ok(refused) => assert_eq(refused, dollar_replacement()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{}").await), "1");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// The package's own errors inside a transaction, and its `commit` after
+// them.
+struct PackageErrors {
+    missing: string,
+    not_an_operator: string,
+    empty: string,
+    counted: string,
+    none_added: string,
+    committed: bool,
+}
+
+// Makes the package's own errors inside a transaction, between two
+// inserts, and commits.
+async fn package_errors_in_a_transaction(db: crate::Database) -> Result<PackageErrors, Error> {
+    let mut tx = db.begin().await?;
+    let c = tx.collection("a_package_error_inside_a_transaction_leaves_it_usable");
+    let ada = Aged { name: "Ada", age: 36 };
+    let _ada = c.insert(ada).await?;
+    let nobody: Result<Aged, Error> = c.one("{ name: 'Nobody' }").await;
+    let missing = match nobody {
+        Ok(_) => "no error",
+        Err(e) => e.message().clone(),
+    };
+    let not_an_operator = shown(c.update("{}", "{ name: ? }", "x").await);
+    let empty = shown(c.update("{}", "{}").await);
+    let counted = shown(c.count("{ name: ? }").await);
+    let nobody: Vec<Aged> = vec![];
+    let none_added = added(c.insert_many(nobody).await);
+    let alan = Aged { name: "Alan", age: 41 };
+    let _alan = c.insert(alan).await?;
+    let committed = tx.commit().await?;
+    Ok(PackageErrors { missing: missing, not_an_operator: not_an_operator, empty: empty, counted: counted, none_added: none_added, committed: committed })
+}
+
+#[test]
+async fn a_package_error_inside_a_transaction_leaves_it_usable() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_package_error_inside_a_transaction_leaves_it_usable");
+            assert(cleared(c).await);
+            let ran: Result<PackageErrors, Error> = package_errors_in_a_transaction(db).await;
+            match ran {
+                Ok(seen) => {
+                    assert_eq(seen.missing, "no document matches the filter; to read one that may be missing, use `first`");
+                    assert_eq(seen.not_an_operator, "the update text, at character 3: each top-level key of an update starts with `$`, as `$set`; `replace` is the call for a whole document");
+                    assert_eq(seen.empty, "the update text, at character 1: an update names at least one operator, as `$set`");
+                    assert_eq(seen.counted, "this call's texts take 1 value, one for each `?`, but 0 values were given");
+                    assert_eq(seen.none_added, "0");
+                    assert(seen.committed);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            assert_eq(shown(c.count("{}").await), "2");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// What two transactions updating one document give.
+struct Conflict {
+    clash: string,
+    later: string,
+    committed: bool,
+    rolled_back: string,
+}
+
+// Updates Ada in one transaction, then in a second while the first is
+// open, and commits both.
+async fn two_transactions_on_one_document(db: crate::Database) -> Result<Conflict, Error> {
+    let mut first = db.begin().await?;
+    let mut second = db.begin().await?;
+    let a = first.collection("two_transactions_on_one_document_conflict");
+    let b = second.collection("two_transactions_on_one_document_conflict");
+    let _first = a.update("{ name: 'Ada' }", "{ $set: { age: 37 } }").await?;
+    let clash = shown(b.update("{ name: 'Ada' }", "{ $set: { age: 38 } }").await);
+    let later = shown(b.count("{}").await);
+    let committed = first.commit().await?;
+    let rolled_back = answered(second.commit().await);
+    Ok(Conflict { clash: clash, later: later, committed: committed, rolled_back: rolled_back })
+}
+
+#[test]
+async fn two_transactions_on_one_document_conflict() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("two_transactions_on_one_document_conflict");
+            assert(cleared(c).await);
+            let ada = Aged { name: "Ada", age: 36 };
+            assert_eq(inserted(c.insert(ada).await), "no error");
+            let ran: Result<Conflict, Error> = two_transactions_on_one_document(db).await;
+            match ran {
+                Ok(seen) => {
+                    assert(seen.clash.contains("(code 112); the transaction hit a temporary conflict; run it again"));
+                    assert(!seen.clash.contains("will roll back"));
+                    assert_eq(seen.later, "a call in this transaction failed; it will roll back");
+                    assert(seen.committed);
+                    assert_eq(seen.rolled_back, "the transaction was rolled back: a call in it failed");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let ada_now: Result<Aged, Error> = c.one("{ name: 'Ada' }").await;
+            match ada_now {
+                Ok(p) => assert_eq(p.age, 37),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Reads Ada with `first` inside a transaction of a database connected
+// with `url`.
+async fn first_in_a_transaction(url: string) -> Result<Option<Aged>, Error> {
+    let db = crate::connect(url).await?;
+    let mut tx = db.begin().await?;
+    let c = tx.collection("a_transaction_reads_from_the_primary_whatever_the_url_says");
+    let found: Option<Aged> = c.first("{ name: ? }", "Ada").await?;
+    let _done = tx.commit().await?;
+    Ok(found)
+}
+
+#[test]
+async fn a_transaction_reads_from_the_primary_whatever_the_url_says() {
+    let opened: Result<crate::Database, Error> = database().await;
+    match opened {
+        Ok(db) => {
+            let c = db.collection("a_transaction_reads_from_the_primary_whatever_the_url_says");
+            assert(cleared(c).await);
+            let ada = Aged { name: "Ada", age: 36 };
+            assert_eq(inserted(c.insert(ada).await), "no error");
+            let base = url();
+            let preferring = if base.contains("?") {
+                format!("{}&readPreference=secondaryPreferred", base)
+            } else {
+                format!("{}?readPreference=secondaryPreferred", base)
+            };
+            let found: Result<Option<Aged>, Error> = first_in_a_transaction(preferring).await;
+            match found {
+                Ok(Some(p)) => assert_eq(p.age, 36),
+                Ok(None) => assert(false),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}

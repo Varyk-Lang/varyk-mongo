@@ -1,0 +1,20 @@
+[package]
+name = "varyk-mongo"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+authors = ["Vlad Mickevic"]
+description = "The MongoDB package for Varyk, a language for backend services that compiles to Rust: typed documents, query text with values beside it, aggregation, indexes, and transactions over the official mongodb crate"
+repository = "https://github.com/Varyk-Lang/varyk-mongo"
+homepage = "https://varyk.com"
+keywords = ["varyk", "mongodb", "mongo", "database", "nosql"]
+categories = ["database"]
+
+[lib]
+path = "src/lib.vr"
+
+[dependencies]
+varyk-std = "0.8.1"
+mongodb = { version = "3.9", default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"] }
+tokio = { version = "1", default-features = false, features = ["sync"] }
