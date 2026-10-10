@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MONGO_URL: mongodb://127.0.0.1:27017/varyk_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: varyk-mongo
+
+      # A replica set of one server, since the transaction tests need one.
+      # GitHub's service containers cannot pass `--replSet`, so it is
+      # started here. The member is named by an address the tests reach.
+      - name: Start MongoDB
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval "db.runCommand({ ping: 1 }).ok" > /dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec mongo mongosh --quiet --eval "rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: '127.0.0.1:27017' }] })"
+          for i in $(seq 1 30); do
+            if [ "$(docker exec mongo mongosh --quiet --eval 'db.hello().isWritablePrimary')" = "true" ]; then
+              echo "primary after $i tries"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::MongoDB did not become the primary"
+          exit 1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install varyk
+        run: cargo install varyk --version '^0.8.1' --locked
+
+      - name: Check
+        working-directory: varyk-mongo
+        run: varyk check
+
+      - name: Test
+        working-directory: varyk-mongo
+        run: varyk test
+
+      # The demo prints one line, which does not change from run to run:
+      # Ada was found, is the one recent user, and one document was deleted.
+      - name: Demo
+        working-directory: varyk-mongo/demo/users
+        run: |
+          out="$(varyk run)"
+          echo "$out"
+          test "$out" = "true 1 1"
+
+      - name: Format check
+        working-directory: varyk-mongo
+        run: rustfmt --edition 2024 --check src/*.rs
+
+      - name: Clippy
+        working-directory: varyk-mongo
+        run: |
+          crate="$(varyk publish --assemble-only)"
+          cd "$crate"
+          cargo clippy --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      # Pins every cargo call to 1.88, which the mongodb crate needs.
+      RUSTUP_TOOLCHAIN: "1.88"
+      MONGO_URL: mongodb://127.0.0.1:27017/varyk_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: varyk-mongo
+
+      - name: Start MongoDB
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval "db.runCommand({ ping: 1 }).ok" > /dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec mongo mongosh --quiet --eval "rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: '127.0.0.1:27017' }] })"
+          for i in $(seq 1 30); do
+            if [ "$(docker exec mongo mongosh --quiet --eval 'db.hello().isWritablePrimary')" = "true" ]; then
+              echo "primary after $i tries"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::MongoDB did not become the primary"
+          exit 1
+
+      - uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install varyk
+        run: cargo install varyk --version '^0.8.1' --locked
+
+      - name: Check
+        working-directory: varyk-mongo
+        run: varyk check
+
+      - name: Test
+        working-directory: varyk-mongo
+        run: varyk test

@@ -1,0 +1,38 @@
+// The users program of the README: reads `MONGO_URL`, makes the unique
+// index on `email`, writes one user, reads it back two ways, renames it,
+// deletes it, and prints `true 1 1`.
+
+struct Config {
+    mongo_url: string,
+}
+
+struct User {
+    #[rename("_id")]
+    id: Uuid,
+    email: string,
+    name: string,
+    created_at: Time,
+}
+
+async fn run() -> Result<bool, Error> {
+    let config: Config = env::parse()?;
+    let db = mongo::connect(config.mongo_url).await?;
+    let users = db.collection("users");
+    users.create_index("{ email: 1 }", "{ unique: true }").await?;
+
+    users.delete_many("{ email: ? }", "ada@example.com").await?;   // a rerun starts clean
+    let ada = User { id: Uuid::new(), email: "ada@example.com", name: "Ada", created_at: Time::now() };
+    users.insert(ada).await?;
+
+    let found: Option<User> = users.first("{ email: ? }", "ada@example.com").await?;
+    let recent: Vec<User> = users.find("{ created_at: { $gte: ? } }", ada.created_at)
+        .sort("{ created_at: -1 }").limit(20).all().await?;
+    users.update("{ _id: ? }", "{ $set: { name: ? } }", ada.id, "Ada L.").await?;
+    let gone: u64 = users.delete("{ _id: ? }", ada.id).await?;
+    println!("{} {} {}", found.is_some(), recent.len(), gone);
+    Ok(true)
+}
+
+async fn main() -> Result<bool, Error> {
+    run().await
+}

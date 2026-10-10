@@ -1,0 +1,61 @@
+name: Latest varyk
+
+# An early warning, not a required check: does varyk-mongo still build and
+# pass its tests with the newest varyk on crates.io? A new minor version
+# of varyk needs a varyk-mongo release that moves `varyk-std` to it; this
+# job tries that move for one run, so a red run says the release is due.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-varyk:
+    runs-on: ubuntu-latest
+    env:
+      MONGO_URL: mongodb://127.0.0.1:27017/varyk_test
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every test needs a server, and the transaction tests a replica set,
+      # started as in ci.yml.
+      - name: Start MongoDB
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval "db.runCommand({ ping: 1 }).ok" > /dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec mongo mongosh --quiet --eval "rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: '127.0.0.1:27017' }] })"
+          for i in $(seq 1 30); do
+            if [ "$(docker exec mongo mongosh --quiet --eval 'db.hello().isWritablePrimary')" = "true" ]; then
+              echo "primary after $i tries"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::MongoDB did not become the primary"
+          exit 1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the newest varyk
+        run: cargo install varyk --locked
+
+      - name: Require the varyk-std of that varyk
+        run: |
+          version=$(varyk --version | awk '{print $2}')
+          minor=$(echo "$version" | cut -d. -f1,2)
+          echo "varyk $version, varyk-std $minor"
+          sed -i "s/^varyk-std = \".*\"/varyk-std = \"$minor\"/" Cargo.toml
+          grep -qx "varyk-std = \"$minor\"" Cargo.toml
+
+      - name: Check
+        run: varyk check
+
+      - name: Test
+        run: varyk test
