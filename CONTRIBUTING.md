@@ -59,8 +59,10 @@ The minimum supported Rust version is 1.88, which the `mongodb` crate
 needs, and CI checks it. Every Monday, and on demand from the Actions
 tab, the "Latest varyk" workflow builds and tests varyk-mongo with the
 newest varyk on crates.io, moving `varyk-std` to its version for that
-run. It is not a required check; a red run means a new varyk needs a
-varyk-mongo release.
+run. It is not a required check; a red run is an early warning that a
+newer varyk changed something varyk-mongo's Rust calls. A release that
+moves `varyk-std` follows each minor varyk when convenient, not at
+once.
 
 ## Where things are
 

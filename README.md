@@ -4,7 +4,7 @@ The official MongoDB package for [Varyk](https://varyk.com), a language
 for backend services that compiles to Rust, over the official `mongodb`
 crate.
 
-varyk-mongo 0.1 works with varyk 0.8.1 and later 0.8 releases (see
+varyk-mongo 0.1 works with varyk 0.8.1 or later (see
 [Versions](#versions)), and programs that use it need Rust 1.88 or
 later. Varyk is experimental and pre-1.0: anything here may change.
 varyk-mongo is not affiliated with or endorsed by MongoDB, Inc.
@@ -17,7 +17,7 @@ test against a real server.
 ## Install
 
 ```sh
-cargo install varyk --version '^0.8.1' --locked
+cargo install varyk --locked
 varyk init users
 cd users
 varyk add varyk-mongo --rename mongo
@@ -641,15 +641,18 @@ Atlas Search helpers.
 
 ## Versions
 
-A program and varyk-mongo must resolve to one `varyk-std`, or the
-generated Rust has two `Error` types, so each minor varyk release is
-followed by a varyk-mongo release. varyk-mongo needs varyk-std 0.8.1 or
-later, which hands `Time`, `Uuid`, and `Bytes` to the package as typed
-values.
+Since varyk 0.9.0, a package's `varyk-std` line is the oldest varyk
+it builds with: a program that uses varyk-mongo 0.1 builds under varyk
+0.8.1 or any later one, so a minor varyk release no longer needs a
+varyk-mongo release at once. A release that moves the line still follows,
+when convenient, since `varyk publish` of a library that uses
+varyk-mongo needs a varyk on the same minor as that line.
+varyk-mongo needs varyk-std 0.8.1 or later, which hands `Time`,
+`Uuid`, and `Bytes` to the package as typed values.
 
 | varyk-mongo | varyk | Rust |
 |---|---|---|
-| 0.1 | 0.8.1 and later 0.8 releases | 1.88 or later |
+| 0.1 | 0.8.1 or later | 1.88 or later |
 
 ## Security
 
