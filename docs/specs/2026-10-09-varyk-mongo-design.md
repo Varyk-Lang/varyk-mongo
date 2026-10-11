@@ -543,7 +543,8 @@ crate anyone else could register first. Section 6.1 and 6.2 are each a
 `fix:` commit, and 6.3 a `docs:` commit beside 6.1's. `fix:`, not `feat:`, on
 purpose: a `feat:` before 1.0 bumps the minor version to 0.9, and every
 package's `varyk-std = "0.8"` requirement would then need a release of
-its own. The change is additive within 0.8, so a patch release is
+its own (until varyk 0.9.0 made the line the oldest varyk a package
+builds with). The change is additive within 0.8, so a patch release is
 honest under semver, and each commit's subject says what it fixes for a
 package ("Time, Uuid, and Bytes keep their type outside JSON"), not
 "add a module", so the changelog line under fixes reads true.
