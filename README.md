@@ -645,8 +645,8 @@ Since varyk 0.9.0, a package's `varyk-std` line is the oldest varyk
 it builds with: a program that uses varyk-mongo 0.1 builds under varyk
 0.8.1 or any later one, so a minor varyk release no longer needs a
 varyk-mongo release at once. A release that moves the line still follows,
-when convenient, since `varyk publish` of a library that uses
-varyk-mongo needs a varyk on the same minor as that line.
+when convenient, since `varyk publish` of a library or a program
+that uses varyk-mongo needs a varyk on the same minor as that line.
 varyk-mongo needs varyk-std 0.8.1 or later, which hands `Time`,
 `Uuid`, and `Bytes` to the package as typed values.
 
