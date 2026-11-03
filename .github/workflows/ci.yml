@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: its kernel reports itself as 7.0.0, and mongod
+    # 8.0 before 8.0.37 refuses to start on 6.19 and newer
+    # (SERVER-121912, fixed for Ubuntu kernels by SERVER-131779). Back
+    # to ubuntu-latest once mongo:8.0 is 8.0.37 or later.
+    runs-on: ubuntu-22.04
     env:
       MONGO_URL: mongodb://127.0.0.1:27017/varyk_test
     steps:
@@ -81,7 +85,8 @@ jobs:
           cargo clippy --all-targets -- -D warnings
 
   msrv:
-    runs-on: ubuntu-latest
+    # ubuntu-22.04 for the server, as in `test`.
+    runs-on: ubuntu-22.04
     env:
       # Pins every cargo call to 1.88, which the mongodb crate needs.
       RUSTUP_TOOLCHAIN: "1.88"
