@@ -759,12 +759,16 @@ move with the code.
   the branch ruleset requires: each starts `mongo:8.0` as a single-node
   replica set with `docker run`, initiates it as in section 7 (GitHub's
   service containers cannot pass `--replSet`), and waits until
-  `db.hello().isWritablePrimary` is true, installs
+  `db.hello().isWritablePrimary` is true, printing the server's log
+  and failing when the container stops first, installs
   `varyk` from crates.io, and runs `varyk check` and `varyk test`; `test`
   also runs `rustfmt --edition 2024 --check` on `src/*.rs`, `cargo clippy --all-targets -- -D warnings` in the
   crate `varyk publish --assemble-only` writes, and the demo. The
   `latest-varyk` workflow is varyk-sql's, starting the replica set as
-  `ci.yml` does, since every test needs a server. The tests target MongoDB 8.0,
+  `ci.yml` does, since every test needs a server. All three jobs run on
+  `ubuntu-22.04` until `mongo:8.0` is 8.0.37 or later: mongod 8.0
+  before 8.0.37 refuses to start on a kernel of 6.19 or newer, and
+  `ubuntu-latest`'s kernel reports itself as 7.0.0. The tests target MongoDB 8.0,
   and the README claims no other server version.
 - No `unwrap`, `expect`, or other crash-on-absence call in `src/*.rs`.
 - README: install, the example of section 1, configuration, TLS, the

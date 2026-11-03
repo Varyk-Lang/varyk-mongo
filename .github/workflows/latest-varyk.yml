@@ -15,7 +15,8 @@ permissions:
 
 jobs:
   latest-varyk:
-    runs-on: ubuntu-latest
+    # ubuntu-22.04 for the server, as in ci.yml.
+    runs-on: ubuntu-22.04
     env:
       MONGO_URL: mongodb://127.0.0.1:27017/varyk_test
     steps:

@@ -26,7 +26,12 @@ docker exec varyk-mongo-test mongosh --quiet --eval "db.hello().isWritablePrimar
 ```
 
 The last line prints `true` once the server is ready, after a few
-seconds. The tests use `MONGO_URL`, or
+seconds. On a Linux host whose kernel is 6.19 or newer, Ubuntu's 7.0.0
+among them, mongod 8.0 before 8.0.37 exits at start with "MongoDB
+cannot start: Linux kernel versions 6.19 and newer has a known
+incompatibility" (`docker logs varyk-mongo-test` shows it); run the
+server on an older kernel or in Docker Desktop 4.93 or later until
+`mongo:8.0` is 8.0.37. The tests use `MONGO_URL`, or
 `mongodb://127.0.0.1:27017/varyk_test` when it is not set. When port
 27017 is taken, run the server on another port, name the member after
 it, and set `MONGO_URL` to match:
