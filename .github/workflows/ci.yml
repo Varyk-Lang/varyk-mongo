@@ -28,6 +28,12 @@ jobs:
             docker exec mongo mongosh --quiet --eval "db.runCommand({ ping: 1 }).ok" > /dev/null 2>&1 && break
             sleep 2
           done
+          # A server that stopped says why only in its own log.
+          if [ "$(docker inspect -f '{{.State.Running}}' mongo)" != "true" ]; then
+            docker logs mongo
+            echo "::error::MongoDB stopped: $(docker inspect -f 'exit code {{.State.ExitCode}}, OOM killed {{.State.OOMKilled}}' mongo)"
+            exit 1
+          fi
           docker exec mongo mongosh --quiet --eval "rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: '127.0.0.1:27017' }] })"
           for i in $(seq 1 30); do
             if [ "$(docker exec mongo mongosh --quiet --eval 'db.hello().isWritablePrimary')" = "true" ]; then
@@ -92,6 +98,12 @@ jobs:
             docker exec mongo mongosh --quiet --eval "db.runCommand({ ping: 1 }).ok" > /dev/null 2>&1 && break
             sleep 2
           done
+          # A server that stopped says why only in its own log.
+          if [ "$(docker inspect -f '{{.State.Running}}' mongo)" != "true" ]; then
+            docker logs mongo
+            echo "::error::MongoDB stopped: $(docker inspect -f 'exit code {{.State.ExitCode}}, OOM killed {{.State.OOMKilled}}' mongo)"
+            exit 1
+          fi
           docker exec mongo mongosh --quiet --eval "rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: '127.0.0.1:27017' }] })"
           for i in $(seq 1 30); do
             if [ "$(docker exec mongo mongosh --quiet --eval 'db.hello().isWritablePrimary')" = "true" ]; then
